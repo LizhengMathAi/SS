@@ -45,12 +45,12 @@ class DataGenerator:
     def contrast_error(self, num_layers=10, display=True):
         if display:
             print('=' * 8 + "\tStart to check {}\t".format(self.__str__()) + '=' * 8)
-        xks = np.zeros_like(self.c)
+        xk = self.c.copy()
 
         for k in range(num_layers - 1):
-            xks = self.t@xks + self.c
+            xk = self.t@xk + self.c
 
-        return np.linalg.norm(xks - self.root)
+        return np.linalg.norm(xk - self.root)
 
 
 class JacobiDataGenerator(DataGenerator):
@@ -147,35 +147,36 @@ class Solver:
         contrast_error = sum(contrast_errors) / test_size
 
         xks = model.predict(x=[np.stack(ts), np.stack(cs)])
-        error = np.mean(np.square(xks - np.stack(roots)))
+        norms = np.sqrt(np.sum(np.square(xks - np.stack(roots)), axis=1))
+        error = np.mean(norms)
 
-        return np.sqrt(error), np.sqrt(contrast_error)
+        return error, contrast_error
 
     @classmethod
-    def update(cls, bs, fs, regularizer_rate):
-        n = bs.get_shape().as_list()[-1]
-        bs_noise = tf.Variable(initial_value=np.zeros(shape=(1, n, n)), dtype=tf.float32)
-        fs_noise = tf.Variable(initial_value=np.zeros(shape=(1, n)), dtype=tf.float32)
+    def update(cls, ts, cs, regularizer_rate):
+        n = ts.get_shape().as_list()[-1]
+        t_noise = tf.Variable(initial_value=np.zeros(shape=(1, n, n)), dtype=tf.float32)
+        c_noise = tf.Variable(initial_value=np.zeros(shape=(1, n)), dtype=tf.float32)
 
         def update_formula(xks):
-            mul = (bs + bs_noise) * tf.reshape(xks, (-1, 1, xks.get_shape().as_list()[-1]))
-            return tf.reduce_sum(mul, axis=2) + (fs + fs_noise)
+            mul = (ts + t_noise) * tf.reshape(xks, (-1, 1, xks.get_shape().as_list()[-1]))
+            return tf.reduce_sum(mul, axis=2) + (cs + c_noise)
 
         layer = keras.layers.Lambda(update_formula)
-        layer.losses.append(regularizer_rate * tf.reduce_sum(tf.square(bs_noise)))
-        layer.losses.append(regularizer_rate * tf.reduce_sum(tf.square(fs_noise)))
+        layer.losses.append(regularizer_rate * tf.reduce_sum(tf.square(t_noise)))
+        layer.losses.append(regularizer_rate * tf.reduce_sum(tf.square(c_noise)))
         return layer
 
     @classmethod
     def model(cls, n, num_layers, regularizer_rate):
-        input_bs = keras.layers.Input(shape=[n, n])
-        input_fs = keras.layers.Input(shape=[n])
+        input_ts = keras.layers.Input(shape=[n, n])
+        input_cs = keras.layers.Input(shape=[n])
 
-        xks = cls.update(input_bs, input_fs, regularizer_rate)(input_fs)
+        xks = cls.update(input_ts, input_cs, regularizer_rate)(input_cs)
         for _ in range(num_layers - 1):
-            xks = cls.update(input_bs, input_fs, regularizer_rate)(xks)
+            xks = cls.update(input_ts, input_cs, regularizer_rate)(xks)
 
-        return keras.models.Model(inputs=[input_bs, input_fs], outputs=xks)
+        return keras.models.Model(inputs=[input_ts, input_cs], outputs=xks)
 
     @classmethod
     def example(cls, n=1024, num_layers=4, regularizer_rate=0.001, batch_size=1024, global_step=512, method='jacobi'):
