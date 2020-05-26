@@ -213,49 +213,49 @@ class SORDataGenerator(DataGenerator):
         self.c = self.omega * inv_dl@self.rhs
 
 
-def bn_layer(input_tensor):
-    size = input_tensor.get_shape().as_list()[-1]
-
-    mean, variance = tf.nn.moments(input_tensor, axes=[0])
-    beta = tf.Variable(initial_value=tf.zeros(size, dtype=tf.float32), name="beta")
-    gamma = tf.Variable(initial_value=tf.ones(size, dtype=tf.float32), name="gamma")
-
-    return tf.nn.batch_normalization(input_tensor, mean, variance, beta, gamma, 0.001)
-
-
-def fc_layer(input_tensor, out_channels):
-    weights_shape = [input_tensor.get_shape().as_list()[-1], out_channels]
-
-    weights_init = tf.truncated_normal(weights_shape, stddev=np.sqrt(2 / (weights_shape[0] + weights_shape[1])))
-    # weights_init = tf.zeros(weights_shape, dtype=tf.float32)
-    weights = tf.Variable(initial_value=weights_init, dtype=tf.float32, name="weights")
-    tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(weights)))
-
-    mul_tensor = tf.matmul(input_tensor, weights)
-
-    bias = tf.Variable(initial_value=tf.zeros((weights_shape[1]), dtype=tf.float32), name="bias")
-    tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(bias)))
-    return mul_tensor + bias
-
-
 class TensorflowSolver:
+    # ---------------------- neural network of remainder ----------------------
+    @staticmethod
+    def bn_layer(input_tensor):
+        size = input_tensor.get_shape().as_list()[-1]
+
+        mean, variance = tf.nn.moments(input_tensor, axes=[0])
+        beta = tf.Variable(initial_value=tf.zeros(size, dtype=tf.float32), name="beta")
+        gamma = tf.Variable(initial_value=tf.ones(size, dtype=tf.float32), name="gamma")
+
+        return tf.nn.batch_normalization(input_tensor, mean, variance, beta, gamma, 0.001)
+
+    @staticmethod
+    def fc_layer(input_tensor, out_channels):
+        weights_shape = [input_tensor.get_shape().as_list()[-1], out_channels]
+
+        weights_init = tf.truncated_normal(weights_shape, stddev=np.sqrt(2 / (weights_shape[0] + weights_shape[1])))
+        # weights_init = tf.zeros(weights_shape, dtype=tf.float32)
+        weights = tf.Variable(initial_value=weights_init, dtype=tf.float32, name="weights")
+        tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(weights)))
+
+        mul_tensor = tf.matmul(input_tensor, weights)
+
+        bias = tf.Variable(initial_value=tf.zeros((weights_shape[1]), dtype=tf.float32), name="bias")
+        tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(bias)))
+        return mul_tensor + bias
+
+    def block(self, tensor, output_channels):
+        channels = tensor.get_shape().as_list()[-1]
+
+        tensor_1 = self.fc_layer(tensor, channels)
+        tensor_1 = self.bn_layer(tensor_1)
+        tensor_1 = tf.nn.relu(tensor_1)
+
+        tensor_2 = self.fc_layer(tensor_1, channels)
+        tensor_2 = self.bn_layer(tensor_2)
+        tensor_2 = tf.nn.relu(tensor_2)
+
+        tensor = tensor + tensor_2
+
+        return self.fc_layer(tensor, output_channels)
 
     def remainder(self, ts, cs):
-
-        def block(tensor, output_channels):
-            channels = tensor.get_shape().as_list()[-1]
-
-            tensor_1 = fc_layer(tensor, channels)
-            tensor_1 = bn_layer(tensor_1)
-            tensor_1 = tf.nn.relu(tensor_1)
-
-            tensor_2 = fc_layer(tensor_1, channels)
-            tensor_2 = bn_layer(tensor_2)
-            tensor_2 = tf.nn.relu(tensor_2)
-
-            tensor = tensor + tensor_2
-
-            return fc_layer(tensor, output_channels)
 
         with tf.name_scope("pre_processing"):
             t_flatten = tf.reshape(ts, shape=[-1, (self.n - 1) ** 4])
@@ -263,7 +263,7 @@ class TensorflowSolver:
 
         for i in range(8):
             with tf.name_scope("hidden_{}".format(i)):
-                x = block(x, 64)
+                x = self.block(x, 64)
 
         weights_init = tf.zeros(shape=[x.get_shape().as_list()[-1], (self.n - 1) ** 2], dtype=tf.float32)
         weights = tf.Variable(initial_value=weights_init, dtype=tf.float32, name="weights")
@@ -272,38 +272,9 @@ class TensorflowSolver:
         return tf.matmul(x, weights)
 
     # ---------------------- data generator ----------------------
-    def __init__(self, n, num_layers):
-        self.n = n
-        self.num_layers = num_layers
+    def sequence(self, h, batch_size, version):
 
-        self.input_ts = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2, (self.n - 1) ** 2], name="t")
-        self.input_cs = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="c")
-        self.input_roots = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="root")
-
-        xks = tf.identity(self.input_cs)
-        for _ in range(num_layers - 1):
-            xks = tf.reduce_sum(self.input_ts * tf.reshape(xks, [-1, 1, (self.n - 1) ** 2]), axis=2) + self.input_cs
-
-        with tf.name_scope("remainder"):
-            remainder = self.remainder(self.input_ts, self.input_cs)
-
-        self.output_roots = xks + remainder
-
-        with tf.name_scope("loss"):
-            square_norm = tf.reduce_sum(tf.square(self.input_roots - self.output_roots), axis=1)
-            self.loss = tf.reduce_mean(tf.sqrt(square_norm))
-
-        with tf.name_scope("org_loss"):
-            square_norm = tf.reduce_sum(tf.square(self.input_roots - xks), axis=1)
-            self.org_loss = tf.reduce_mean(tf.sqrt(square_norm))
-
-        with tf.name_scope("train_op"):
-            regularizer = tf.add_n(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
-            # self.train_op = tf.train.GradientDescentOptimizer(1e-1).minimize(self.loss + 1e-6 * regularizer)
-            self.train_op = tf.train.GradientDescentOptimizer(1e-2).minimize(self.loss)
-
-    def tarin(self, batch_size=16, global_step=1024, version='jacobi'):
-        sample_size = 1000
+        sample_size = int(1 / h)
 
         if version == "jacobi":
             def train_sequence():
@@ -346,6 +317,42 @@ class TensorflowSolver:
         test_data = test_data.batch(batch_size=batch_size)
         test_samples = test_data.make_one_shot_iterator().get_next()
 
+        return train_samples, test_samples
+
+    # ---------------------- train & test ----------------------
+    def __init__(self, n, num_layers):
+        self.n = n
+        self.num_layers = num_layers
+
+        self.input_ts = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2, (self.n - 1) ** 2], name="t")
+        self.input_cs = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="c")
+        self.input_roots = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="root")
+
+        xks = tf.identity(self.input_cs)
+        for _ in range(num_layers - 1):
+            xks = tf.reduce_sum(self.input_ts * tf.reshape(xks, [-1, 1, (self.n - 1) ** 2]), axis=2) + self.input_cs
+
+        with tf.name_scope("remainder"):
+            remainder = self.remainder(self.input_ts, self.input_cs)
+
+        self.output_roots = xks + remainder
+
+        with tf.name_scope("loss"):
+            square_norm = tf.reduce_sum(tf.square(self.input_roots - self.output_roots), axis=1)
+            self.loss = tf.reduce_mean(tf.sqrt(square_norm))
+
+        with tf.name_scope("org_loss"):
+            square_norm = tf.reduce_sum(tf.square(self.input_roots - xks), axis=1)
+            self.org_loss = tf.reduce_mean(tf.sqrt(square_norm))
+
+        with tf.name_scope("train_op"):
+            regularizer = tf.add_n(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
+            # self.train_op = tf.train.GradientDescentOptimizer(1e-1).minimize(self.loss + 1e-6 * regularizer)
+            self.train_op = tf.train.GradientDescentOptimizer(1e-2).minimize(self.loss)
+
+    def train(self, batch_size=16, global_step=1024, version='jacobi'):
+        train_samples, test_samples = self.sequence(h=1e-3, batch_size=batch_size, version=version)
+
         with tf.Session() as sess:
             tf.global_variables_initializer().run()
             for i in range(global_step):
@@ -373,174 +380,19 @@ class TensorflowSolver:
             print("error:{:.4e}".format(error), ",\tcontrast_error:{:.4e}".format(contrast_error))
 
 
-class KerasSolver:
-    @classmethod
-    def sequence(cls, batch_size, n):
-        while True:
-            ts = []
-            cs = []
-            for _ in range(batch_size):
-                data = JacobiDataGenerator(n=n)
-                ts.append(data.t)
-                cs.append(data.c)
-
-            ts = np.stack(ts)
-            cs = np.stack(cs)
-            t_labels = np.einsum("nij,njk->nik", ts, ts)
-            c_labels = np.einsum("nij,nj->ni", ts, cs) + cs
-            labels = np.concatenate([np.reshape(t_labels, [-1, n ** 2]), c_labels], axis=1)
-            yield {"input_1": ts, "input_2": cs}, labels
-
-    @classmethod
-    def t_logits(cls):
-        def polynomial(ts):
-            with tf.name_scope('t_noise'):
-                n = ts.get_shape().as_list()[-1]
-
-                with tf.name_scope('pre_processing'):
-                    flatten_ts = tf.reshape(ts, shape=[-1, n ** 2])
-
-                with tf.name_scope('square_item'):
-                    weights = tf.Variable(initial_value=tf.zeros([n, n, n ** 2, n ** 2], dtype=tf.float32))
-                    tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(weights)))
-
-                    square_item = tf.einsum("xyij,ni,nj->nxy", weights, flatten_ts, flatten_ts)
-
-                with tf.name_scope('linear_item'):
-                    weights = tf.Variable(initial_value=tf.zeros([n, n, n ** 2], dtype=tf.float32))
-                    tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(weights)))
-
-                    linear_item = tf.einsum("xyi,ni->nxy", weights, flatten_ts)
-
-                t_noise = square_item + linear_item
-
-            return ts + t_noise
-
-        layer = keras.layers.Lambda(polynomial)
-        return layer
-
-    @classmethod
-    def c_logits(cls):
-        def polynomial(args):
-            ts, cs = args
-            with tf.name_scope('c_noise'):
-                n = cs.get_shape().as_list()[-1]
-
-                with tf.name_scope('pre_processing'):
-                    flatten_ts = tf.reshape(ts, shape=[-1, n ** 2])
-
-                with tf.name_scope('square_item'):
-                    weights = tf.Variable(initial_value=tf.zeros([n, n ** 2, n], dtype=tf.float32))
-                    tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(weights)))
-
-                    square_item = tf.einsum("xij,ni,nj->nx", weights, flatten_ts, cs)
-
-                with tf.name_scope('linear_item'):
-                    weights = tf.Variable(initial_value=tf.zeros([n, n], dtype=tf.float32))
-                    tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(weights)))
-
-                    linear_item = tf.einsum("xi,ni->nx", weights, cs)
-
-                c_noise = square_item + linear_item
-
-            return cs + c_noise
-
-        layer = keras.layers.Lambda(polynomial)
-        return layer
-
-    @classmethod
-    def interface(cls):
-        def func(args):
-            t_logits, c_logits = args
-
-            n = c_logits.get_shape().as_list()[-1]
-
-            return tf.concat([tf.reshape(t_logits, [-1, n ** 2]), c_logits], axis=1)
-
-        layer = keras.layers.Lambda(func)
-        return layer
-
-    def loss(self, labels, logits):
-        def func(args):
-            logits_, labels_ = args
-            square_norm = tf.reduce_sum(tf.square(logits_ - labels_), axis=-1)
-
-            return tf.reduce_mean(tf.sqrt(square_norm))
-
-        return keras.layers.Lambda(func)([labels, logits])
-
-    # ---------------------- data generator ----------------------
-    def __init__(self, n):
-        self.n = n
-        self.input_ts = keras.layers.Input(shape=[n, n])
-        self.input_cs = keras.layers.Input(shape=[n])
-        self.labels = keras.layers.Input(shape=[n * (n + 1)])
-
-        self.t_logits = self.t_logits()(self.input_ts)
-        self.c_logits = self.c_logits()([self.input_ts, self.input_cs])
-        logits = self.interface()([self.t_logits, self.c_logits])
-
-        self.model = keras.models.Model(inputs=[self.input_ts, self.input_cs], outputs=logits)
-
-        self.model.compile(optimizer=keras.optimizers.SGD(lr=0.01), loss=self.loss)
-
-    @classmethod
-    def tarin(cls, n, batch_size=2 ** 8, global_step=2 ** 15, version='jacobi'):
-        model = cls(n)
-        # model.model.compile(optimizer=keras.optimizers.SGD(lr=0.1), loss=model.loss
-        #                     # , metrics=['mse']
-        #                     )
-
-        history = model.model.fit_generator(
-            cls.sequence(batch_size=batch_size, n=n), steps_per_epoch=global_step)
-
-        # with tf.name_scope("logits"):
-        #     t_logits = model.input_ts + model.t_noise(model.input_ts)
-        #     c_logits = model.input_cs + model.c_noise(model.input_ts, model.input_cs)
-        #
-        # with tf.name_scope("labels"):
-        #     t_labels = tf.einsum("nij,njk->nik", model.input_ts, model.input_ts)
-        #     c_labels = tf.einsum("nij,nj->ni", model.input_ts, model.input_cs) + model.input_cs
-        #
-        # with tf.name_scope("loss"):
-        #     t_square_norm = tf.reduce_sum(tf.square(t_logits - t_labels), axis=[1, 2])
-        #     c_square_norm = tf.reduce_sum(tf.square(c_logits - c_labels), axis=-1)
-        #
-        #     loss = tf.reduce_mean(tf.sqrt(t_square_norm + c_square_norm))
-        #
-        # with tf.name_scope("train_op"):
-        #     train_op = tf.train.GradientDescentOptimizer(1e-1).minimize(loss)
-        #     # train_op = tf.train.AdamOptimizer(1e-1).minimize(loss)
-        #
-        # with tf.Session() as sess:
-        #     tf.global_variables_initializer().run()
-        #     for i in range(global_step):
-        #         ts = []
-        #         cs = []
-        #         for _ in range(batch_size):
-        #             if version == "jacobi":
-        #                 data = JacobiDataGenerator(n=n)
-        #             elif version == "GS":
-        #                 data = GSDataGenerator(n=n)
-        #             elif version == "SOR":
-        #                 data = SORDataGenerator(n=n)
-        #             else:
-        #                 raise ValueError
-        #             ts.append(data.t)
-        #             cs.append(data.c)
-        #         ts = np.stack(ts)
-        #         cs = np.stack(cs)
-        #         _, loss_val = sess.run([train_op, loss], feed_dict={model.input_ts: ts, model.input_cs: cs})
-        #         if i % 2 ** 10 == 0:
-        #             print("i:{},\tloss:{:.4e}".format(i, loss_val))
+# ===================================================================
+tf.app.flags.DEFINE_integer("n", 8, "dimension.")
+tf.app.flags.DEFINE_integer("l", 4, "number of layers.")
+tf.app.flags.DEFINE_integer("b", 16, "batch size.")
+tf.app.flags.DEFINE_integer("g", 1024, "global step.")
+tf.app.flags.DEFINE_string("v", "GS", "iteration method.")
+FLAGS = tf.app.flags.FLAGS
 
 
-TensorflowSolver(n=8, num_layers=4).tarin(version='jacobi')
-# KerasSolver.tarin(n=8, version='jacobi')
+def main(argv):
+    model = TensorflowSolver(n=FLAGS.n, num_layers=FLAGS.l)
+    model.train(batch_size=FLAGS.b, global_step=FLAGS.g, version=FLAGS.v)
 
-# print(JacobiDataGenerator(n=16).error(num_layers=10))
-# print(GSDataGenerator(n=16).error(num_layers=10))
-# print(SORDataGenerator(n=16).error(num_layers=10))
-# JacobiDataGenerator.plot()
-# GSDataGenerator.plot()
-# SORDataGenerator.plot()
+
+if __name__ == '__main__':
+    tf.app.run(main)
