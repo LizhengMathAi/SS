@@ -5,9 +5,9 @@ for n in 8
 do
 	for l in 4
 	do
-        for b in 16
+        for b in 64
         do
-            for g in 1024
+            for g in 4096
             do
                 for v in "jacobi" "GS" "SOR"
                 do
@@ -20,23 +20,23 @@ do
 done
 
 
-for n in 8
-do
-	for l in 4
-	do
-        for b in 256
-        do
-            for g in 1024
-            do
-                for v in "jacobi" "GS" "SOR"
-                do
-                    echo -e "\033[34mpython test.py --n $n --l $l --b $b --g $g --v $v\033[0m"
-                    python test.py --n $n --l $l --b $b --g $g --v $v
-                done
-            done
-        done
-    done
-done
+#for n in 8
+#do
+#	for l in 4
+#	do
+#        for b in 256
+#        do
+#            for g in 1024
+#            do
+#                for v in "jacobi" "GS" "SOR"
+#                do
+#                    echo -e "\033[34mpython test.py --n $n --l $l --b $b --g $g --v $v\033[0m"
+#                    python test.py --n $n --l $l --b $b --g $g --v $v
+#                done
+#            done
+#        done
+#    done
+#done
 
 
 

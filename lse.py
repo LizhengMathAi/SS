@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.sparse import coo_matrix
-from scipy.sparse.linalg import spsolve
+# from scipy.sparse.linalg import spsolve
 import fem_utils
 
 import tensorflow as tf
@@ -24,12 +24,11 @@ class DataGenerator:
 
     def __init__(self, w, n):
 
-        self.mat, self.rhs, self.numerical_roots, self.root = self.poisson(w, n)
+        self.mat, self.rhs, _ = self.poisson(w, n)
 
         self.d = np.diag(self.mat)
         self.l = np.tril(self.mat, k=-1)
         self.u = np.triu(self.mat, k=1)
-        self.rhs = self.mat@self.root
 
         self.t = None
         self.c = None
@@ -75,12 +74,11 @@ class DataGenerator:
 
         mat = mat_1
         rhs = rhs_2 - mat_2@rhs_1
-        numerical_root = spsolve(mat, rhs)
         root = func_u(mesh.vertices[mesh.inner_node_ids].T)
 
-        return mat.toarray(), rhs, numerical_root, root
+        return mat.toarray(), rhs, root
 
-    def error(self, num_layers=10, display=True):
+    def residual_norm(self, num_layers=10, display=True):
         if display:
             print('=' * 8 + "\tStart to check {}\t".format(self.__str__()) + '=' * 8)
         xk = self.c.copy()
@@ -88,81 +86,7 @@ class DataGenerator:
         for k in range(num_layers - 1):
             xk = self.t@xk + self.c
 
-        return np.linalg.norm(xk - self.root)
-
-    @classmethod
-    def plot(cls, n=8):
-
-        def genuine_solution(variables):
-            mat = np.reshape(variables[:n ** 2], [n, n])
-            rhs = variables[n ** 2:]
-            return np.linalg.solve(mat, rhs)
-
-        def numerical_solution(variables, layers):
-            mat = np.reshape(variables[:n ** 2], [n, n])
-            rhs = variables[n ** 2:]
-            roots = np.linalg.solve(mat, rhs)
-
-            class Data(cls):
-                def build(self, *args, **kwargs):
-                    return mat, roots
-
-            data = Data(n=n)
-            xk = data.c.copy()
-            for k in range(layers - 1):
-                xk = data.t @ xk + data.c
-            return xk
-
-        input_weight_0 = np.random.rand(n*(n+1))
-        input_weight_1 = np.random.rand(n*(n+1))
-        output_weight = np.random.rand(n)
-
-        x = np.linspace(0.5, 1, 25)
-        y = np.linspace(0.5, 1, 25)
-        xx, yy = np.meshgrid(x, y)
-        xv = np.reshape(xx, -1)
-        yv = np.reshape(yy, -1)
-
-        genuine_val = []
-        numerical_val_2 = []
-        numerical_val_4 = []
-        numerical_val_6 = []
-        for x, y in zip(xv, yv):
-            val = genuine_solution(x * input_weight_0 + y * input_weight_1)
-            genuine_val.append(np.inner(output_weight, val))
-            val = numerical_solution(x * input_weight_0 + y * input_weight_1, layers=2)
-            numerical_val_2.append(np.inner(output_weight, val))
-            val = numerical_solution(x * input_weight_0 + y * input_weight_1, layers=4)
-            numerical_val_4.append(np.inner(output_weight, val))
-            val = numerical_solution(x * input_weight_0 + y * input_weight_1, layers=6)
-            numerical_val_6.append(np.inner(output_weight, val))
-        genuine_val = np.reshape(genuine_val, [25, 25])
-        numerical_val_2 = np.reshape(numerical_val_2, [25, 25])
-        numerical_val_4 = np.reshape(numerical_val_4, [25, 25])
-        numerical_val_6 = np.reshape(numerical_val_6, [25, 25])
-
-        from matplotlib import pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D
-
-        fig = plt.figure(figsize=(12, 12))
-
-        ax = fig.add_subplot(2, 2, 1, projection='3d')
-        ax.set_title(r"genuine solution: $z(x, y) = \omega^T (x * A_1 + y * A_2)^{-1} (x * b_1 + y * b_2)$")
-        ax.plot_surface(xx, yy, genuine_val)
-
-        ax = fig.add_subplot(2, 2, 2, projection='3d')
-        ax.set_title(r"numerical solution (iter=2)")
-        ax.plot_surface(xx, yy, numerical_val_2)
-
-        ax = fig.add_subplot(2, 2, 3, projection='3d')
-        ax.set_title(r"numerical solution (iter=4)")
-        ax.plot_surface(xx, yy, numerical_val_4)
-
-        ax = fig.add_subplot(2, 2, 4, projection='3d')
-        ax.set_title(r"numerical solution (iter=6)")
-        ax.plot_surface(xx, yy, numerical_val_6)
-
-        plt.show()
+        return np.linalg.norm(self.mat@xk - self.rhs)
 
 
 class JacobiDataGenerator(DataGenerator):
@@ -261,9 +185,9 @@ class TensorflowSolver:
             t_flatten = tf.reshape(ts, shape=[-1, (self.n - 1) ** 4])
             x = tf.concat([t_flatten, cs], axis=1)
 
-        for i in range(8):
+        for i in range(self.num_layers):
             with tf.name_scope("hidden_{}".format(i)):
-                x = self.block(x, 64)
+                x = self.block(x, 256)
 
         weights_init = tf.zeros(shape=[x.get_shape().as_list()[-1], (self.n - 1) ** 2], dtype=tf.float32)
         weights = tf.Variable(initial_value=weights_init, dtype=tf.float32, name="weights")
@@ -280,40 +204,40 @@ class TensorflowSolver:
             def train_sequence():
                 while True:
                     data = JacobiDataGenerator(w=np.random.randint(sample_size) / sample_size, n=self.n)
-                    yield (data.t, data.c, data.root)
+                    yield (data.mat, data.rhs, data.t, data.c)
 
             def test_sequence():
                 while True:
                     data = JacobiDataGenerator(w=np.random.rand(), n=self.n)
-                    yield (data.t, data.c, data.root)
+                    yield (data.mat, data.rhs, data.t, data.c)
         elif version == "GS":
             def train_sequence():
                 while True:
                     data = GSDataGenerator(w=np.random.randint(sample_size) / sample_size, n=self.n)
-                    yield (data.t, data.c, data.root)
+                    yield (data.mat, data.rhs, data.t, data.c)
 
             def test_sequence():
                 while True:
                     data = GSDataGenerator(w=np.random.rand(), n=self.n)
-                    yield (data.t, data.c, data.root)
+                    yield (data.mat, data.rhs, data.t, data.c)
         elif version == "SOR":
             def train_sequence():
                 while True:
                     data = SORDataGenerator(w=np.random.randint(sample_size) / sample_size, n=self.n)
-                    yield (data.t, data.c, data.root)
+                    yield (data.mat, data.rhs, data.t, data.c)
 
             def test_sequence():
                 while True:
                     data = SORDataGenerator(w=np.random.rand(), n=self.n)
-                    yield (data.t, data.c, data.root)
+                    yield (data.mat, data.rhs, data.t, data.c)
         else:
             raise ValueError
 
-        train_data = tf.data.Dataset.from_generator(train_sequence, (tf.float32, tf.float32, tf.float32))
+        train_data = tf.data.Dataset.from_generator(train_sequence, (tf.float32, tf.float32, tf.float32, tf.float32))
         train_data = train_data.batch(batch_size=batch_size)
         train_samples = train_data.make_one_shot_iterator().get_next()
 
-        test_data = tf.data.Dataset.from_generator(test_sequence, (tf.float32, tf.float32, tf.float32))
+        test_data = tf.data.Dataset.from_generator(test_sequence, (tf.float32, tf.float32, tf.float32, tf.float32))
         test_data = test_data.batch(batch_size=batch_size)
         test_samples = test_data.make_one_shot_iterator().get_next()
 
@@ -324,31 +248,37 @@ class TensorflowSolver:
         self.n = n
         self.num_layers = num_layers
 
-        self.input_ts = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2, (self.n - 1) ** 2], name="t")
-        self.input_cs = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="c")
-        self.input_roots = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="root")
+        self.ts = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2, (self.n - 1) ** 2], name="t")
+        self.cs = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="c")
 
-        xks = tf.identity(self.input_cs)
+        self.mats = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2, (self.n - 1) ** 2], name="mat")
+        self.rhses = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="rhs")
+
+        xks = tf.identity(self.cs)
         for _ in range(num_layers - 1):
-            xks = tf.reduce_sum(self.input_ts * tf.reshape(xks, [-1, 1, (self.n - 1) ** 2]), axis=2) + self.input_cs
+            xks = tf.reduce_sum(self.ts * tf.reshape(xks, [-1, 1, (self.n - 1) ** 2]), axis=2) + self.cs
 
         with tf.name_scope("remainder"):
-            remainder = self.remainder(self.input_ts, self.input_cs)
+            remainder = self.remainder(self.ts, self.cs)
 
         self.output_roots = xks + remainder
 
         with tf.name_scope("loss"):
-            square_norm = tf.reduce_sum(tf.square(self.input_roots - self.output_roots), axis=1)
+            residual = tf.reduce_sum(
+                self.mats * tf.reshape(self.output_roots, [-1, 1, (self.n - 1) ** 2]), axis=2) - self.rhses
+            square_norm = tf.reduce_sum(tf.square(residual), axis=1)
             self.loss = tf.reduce_mean(tf.sqrt(square_norm))
 
         with tf.name_scope("org_loss"):
-            square_norm = tf.reduce_sum(tf.square(self.input_roots - xks), axis=1)
+            residual = tf.reduce_sum(self.mats * tf.reshape(xks, [-1, 1, (self.n - 1) ** 2]), axis=2) - self.rhses
+            square_norm = tf.reduce_sum(tf.square(residual), axis=1)
             self.org_loss = tf.reduce_mean(tf.sqrt(square_norm))
 
         with tf.name_scope("train_op"):
-            regularizer = tf.add_n(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
-            # self.train_op = tf.train.GradientDescentOptimizer(1e-1).minimize(self.loss + 1e-6 * regularizer)
-            self.train_op = tf.train.GradientDescentOptimizer(1e-2).minimize(self.loss)
+            count = sum([sum(v.get_shape().as_list()) for v in tf.trainable_variables()])
+            print("count", count)
+            regularizer = 1e-3 / count * tf.add_n(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
+            self.train_op = tf.train.GradientDescentOptimizer(1e-3).minimize(self.loss + regularizer)
 
     def train(self, batch_size=16, global_step=1024, version='jacobi'):
         train_samples, test_samples = self.sequence(h=1e-3, batch_size=batch_size, version=version)
@@ -356,26 +286,24 @@ class TensorflowSolver:
         with tf.Session() as sess:
             tf.global_variables_initializer().run()
             for i in range(global_step):
-                ts, cs, roots = sess.run(train_samples)
-                sess.run(self.train_op, feed_dict={self.input_ts: ts, self.input_cs: cs, self.input_roots: roots})
-                if i % 16 == 0:
-                    print('\r', end='')
-                    loss_val, org_loss_val = sess.run(
-                        [self.loss, self.org_loss],
-                        feed_dict={self.input_ts: ts, self.input_cs: cs, self.input_roots: roots})
-                    print("{:7d}/{}\t\tloss:{:.4e}\t\torg_loss:{:.4e}".format(
-                        batch_size * i, batch_size * global_step, loss_val, org_loss_val), end='')
+                ts, cs, mats, rhses = sess.run(train_samples)
+                _, loss_val, org_loss_val = sess.run(
+                    [self.train_op, self.loss, self.org_loss],
+                    feed_dict={self.ts: ts, self.cs: cs, self.mats: mats, self.rhses: rhses})
+                print("\r{:7d}/{}\t\tloss:{:.4e}\t\torg_loss:{:.4e}".format(
+                    batch_size * i, batch_size * global_step, loss_val, org_loss_val), end='')
 
             print()
-            ts, cs, roots = sess.run(test_samples)
+            ts, cs, mats, rhses = sess.run(test_samples)
 
             xks = cs.copy()
             for k in range(self.num_layers - 1):
                 xks = np.einsum("nij,nj->ni", ts, xks) + cs
-            error = np.sqrt(np.sum(np.square(xks - roots), axis=1)).mean()
+            residual = np.einsum("nij,nj->ni", mats, xks) - rhses
+            error = np.sqrt(np.sum(np.square(residual), axis=1)).mean()
 
             contrast_error = sess.run(
-                self.loss, feed_dict={self.input_ts: ts, self.input_cs: cs, self.input_roots: roots})
+                self.loss, feed_dict={self.ts: ts, self.cs: cs, self.mats: mats, self.rhses: rhses})
 
             print("error:{:.4e}".format(error), ",\tcontrast_error:{:.4e}".format(contrast_error))
 
