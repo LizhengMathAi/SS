@@ -3,17 +3,14 @@ source ~/Documents/pyenv/tensorflow/bin/activate
 
 for n in 8
 do
-	for l in 4
+	for l in 8
 	do
-        for b in 64
+        for g in 1024
         do
-            for g in 4096
+            for v in "jacobi" "GS" "SOR"
             do
-                for v in "jacobi" "GS" "SOR"
-                do
-                    echo -e "\033[34mpython lse.py --n $n --l $l --b $b --g $g --v $v\033[0m"
-                    python lse.py --n $n --l $l --b $b --g $g --v $v
-                done
+                echo -e "\033[34mpython lse.py --n $n --l $l --g $g --v $v\033[0m"
+                python lse.py --n $n --l $l --g $g --v $v
             done
         done
     done

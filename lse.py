@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.sparse import coo_matrix
 # from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import inv
 import fem_utils
 
 import tensorflow as tf
@@ -24,59 +25,23 @@ class DataGenerator:
 
     def __init__(self, w, n):
 
-        self.mat, self.rhs, _ = self.poisson(w, n)
+        self.mat, self.rhs = self.pde(w, n)
 
-        self.d = np.diag(self.mat)
-        self.l = np.tril(self.mat, k=-1)
-        self.u = np.triu(self.mat, k=1)
+        ind = [i for i in range(self.mat.data.__len__()) if self.mat.row[i] == self.mat.col[i]]
+        self.d = coo_matrix((self.mat.data[ind], (self.mat.row[ind], self.mat.col[ind])), shape=self.mat.shape)
+
+        ind = [i for i in range(self.mat.data.__len__()) if self.mat.row[i] > self.mat.col[i]]
+        self.l = coo_matrix((self.mat.data[ind], (self.mat.row[ind], self.mat.col[ind])), shape=self.mat.shape)
+
+        ind = [i for i in range(self.mat.data.__len__()) if self.mat.row[i] < self.mat.col[i]]
+        self.u = coo_matrix((self.mat.data[ind], (self.mat.row[ind], self.mat.col[ind])), shape=self.mat.shape)
 
         self.t = None
         self.c = None
 
     @classmethod
-    def poisson(cls, w, n, num_refine=3):
-        """
-        -\Delta u = f, \boldsymbol{x} \in \Omega
-        u = g, \boldsymbol{x} \in \partial \Omega
-        """
-        def func_u(x):
-            return np.cos(w * x[0] + (1 - w) * x[1])
-
-        def func_f(x):
-            return -(w ** 2 + (1 - w) ** 2) * np.cos(w * x[0] + (1 - w) * x[1])
-
-        func_g = func_u
-
-        # Start to solve
-        mesh = fem_utils.SquareMesh(n=n)
-
-        inner_nn = mesh.inner_node_ids.__len__()
-        bound_nn = mesh.bound_node_ids.__len__()
-
-        # compute mat of (\nabla \phi_{\boldsymbol{u}}, \nabla \phi_{\boldsymbol{u}})
-        # P_1 X P_1
-        gram_tensor = mesh.gram_grad_p1()
-        mat = mesh.node_mul_node(gram_tensor)
-
-        mat_1 = mat[mesh.inner_node_ids, mesh.inner_node_ids]
-        mat_1 = coo_matrix((mat_1.data, (mat_1.idx[0], mat_1.idx[1])), shape=(inner_nn, inner_nn))
-
-        mat_2 = mat[mesh.inner_node_ids, mesh.bound_node_ids]
-        mat_2 = coo_matrix((mat_2.data, (mat_2.idx[0], mat_2.idx[1])), shape=(inner_nn, bound_nn))
-
-        bound_vertices = mesh.vertices[mesh.bound_node_ids]
-        rhs_1 = func_g(bound_vertices.T)
-
-        # compute mat of (\phi_p, f)
-        integer_tensor = mesh.integer_p1(func_f, num_refine=num_refine)
-        rhs = mesh.node_mul_func(integer_tensor)
-        rhs_2 = rhs[mesh.inner_node_ids]
-
-        mat = mat_1
-        rhs = rhs_2 - mat_2@rhs_1
-        root = func_u(mesh.vertices[mesh.inner_node_ids].T)
-
-        return mat.toarray(), rhs, root
+    def pde(cls, w, n, num_refine=3):
+        pass
 
     def residual_norm(self, num_layers=10, display=True):
         if display:
@@ -100,8 +65,9 @@ class JacobiDataGenerator(DataGenerator):
     def __init__(self, *args, **kwargs):
         super(JacobiDataGenerator, self).__init__(*args, **kwargs)
 
-        self.t = -np.einsum('i,ij->ij', 1 / self.d, self.l + self.u)
-        self.c = self.rhs / self.d
+        inv_d = inv(self.d)
+        self.t = -inv_d@(self.l + self.u)
+        self.c = inv_d@self.rhs
 
 
 class GSDataGenerator(DataGenerator):
@@ -115,7 +81,7 @@ class GSDataGenerator(DataGenerator):
     def __init__(self, *args, **kwargs):
         super(GSDataGenerator, self).__init__(*args, **kwargs)
 
-        inv_dl = np.linalg.inv(np.diag(self.d) + self.l)
+        inv_dl = inv(self.d + self.l)
         self.t = -inv_dl@self.u
         self.c = inv_dl@self.rhs
 
@@ -132,12 +98,12 @@ class SORDataGenerator(DataGenerator):
         super(SORDataGenerator, self).__init__(*args, **kwargs)
 
         self.omega = omega
-        inv_dl = np.linalg.inv(np.diag(self.d) + self.omega * self.l)
-        self.t = inv_dl@((1 - self.omega) * np.diag(self.d) - self.u)
+        inv_dl = inv(self.d + self.omega * self.l)
+        self.t = inv_dl@((1 - self.omega) * self.d - self.u)
         self.c = self.omega * inv_dl@self.rhs
 
 
-class TensorflowSolver:
+class SparseSolver:
     # ---------------------- neural network of remainder ----------------------
     @staticmethod
     def bn_layer(input_tensor):
@@ -179,11 +145,10 @@ class TensorflowSolver:
 
         return self.fc_layer(tensor, output_channels)
 
-    def remainder(self, ts, cs):
+    def remainder(self, feature):
 
         with tf.name_scope("pre_processing"):
-            t_flatten = tf.reshape(ts, shape=[-1, (self.n - 1) ** 4])
-            x = tf.concat([t_flatten, cs], axis=1)
+            x = tf.reshape(feature, shape=[1, -1])
 
         for i in range(self.num_layers):
             with tf.name_scope("hidden_{}".format(i)):
@@ -192,86 +157,89 @@ class TensorflowSolver:
         weights_init = tf.zeros(shape=[x.get_shape().as_list()[-1], (self.n - 1) ** 2], dtype=tf.float32)
         weights = tf.Variable(initial_value=weights_init, dtype=tf.float32, name="weights")
         tf.add_to_collection(tf.GraphKeys.REGULARIZATION_LOSSES, tf.reduce_sum(tf.abs(weights)))
+        x = tf.matmul(x, weights)
 
-        return tf.matmul(x, weights)
+        with tf.name_scope("post_processing"):
+            x = tf.reshape(x, shape=[-1, 1])
+        return x
 
     # ---------------------- data generator ----------------------
-    def sequence(self, h, batch_size, version):
+    _data_generator = None
+
+    @property
+    def data_generator(self):
+        if self._data_generator is None:
+            if self.version == "jacobi":
+                self._data_generator = JacobiDataGenerator
+            elif self.version == "GS":
+                self._data_generator = GSDataGenerator
+            elif self.version == "SOR":
+                self._data_generator = SORDataGenerator
+            else:
+                raise ValueError
+        return self._data_generator
+
+    @property
+    def train_samples(self, h=1e-3):
 
         sample_size = int(1 / h)
 
-        if version == "jacobi":
-            def train_sequence():
-                while True:
-                    data = JacobiDataGenerator(w=np.random.randint(sample_size) / sample_size, n=self.n)
-                    yield (data.mat, data.rhs, data.t, data.c)
+        data = self.data_generator(w=np.random.randint(sample_size) / sample_size, n=self.n)
 
-            def test_sequence():
-                while True:
-                    data = JacobiDataGenerator(w=np.random.rand(), n=self.n)
-                    yield (data.mat, data.rhs, data.t, data.c)
-        elif version == "GS":
-            def train_sequence():
-                while True:
-                    data = GSDataGenerator(w=np.random.randint(sample_size) / sample_size, n=self.n)
-                    yield (data.mat, data.rhs, data.t, data.c)
+        mat = tf.SparseTensorValue(np.stack(data.mat.nonzero(), axis=1), data.mat.data, data.mat.shape)
+        rhs = data.rhs
+        t = tf.SparseTensorValue(np.stack(data.t.nonzero(), axis=1), data.t.data, data.t.shape)
+        c = data.c
+        feature = np.concatenate([data.t.data, data.c])
 
-            def test_sequence():
-                while True:
-                    data = GSDataGenerator(w=np.random.rand(), n=self.n)
-                    yield (data.mat, data.rhs, data.t, data.c)
-        elif version == "SOR":
-            def train_sequence():
-                while True:
-                    data = SORDataGenerator(w=np.random.randint(sample_size) / sample_size, n=self.n)
-                    yield (data.mat, data.rhs, data.t, data.c)
+        return mat, rhs, t, c, feature
 
-            def test_sequence():
-                while True:
-                    data = SORDataGenerator(w=np.random.rand(), n=self.n)
-                    yield (data.mat, data.rhs, data.t, data.c)
-        else:
-            raise ValueError
+    @property
+    def test_samples(self):
+        data = self.data_generator(w=np.random.rand(), n=self.n)
 
-        train_data = tf.data.Dataset.from_generator(train_sequence, (tf.float32, tf.float32, tf.float32, tf.float32))
-        train_data = train_data.batch(batch_size=batch_size)
-        train_samples = train_data.make_one_shot_iterator().get_next()
+        mat = tf.SparseTensorValue(np.stack(data.mat.nonzero(), axis=1), data.mat.data, data.mat.shape)
+        rhs = data.rhs
+        t = tf.SparseTensorValue(np.stack(data.t.nonzero(), axis=1), data.t.data, data.t.shape)
+        c = data.c
+        feature = np.concatenate([data.t.data, data.c])
 
-        test_data = tf.data.Dataset.from_generator(test_sequence, (tf.float32, tf.float32, tf.float32, tf.float32))
-        test_data = test_data.batch(batch_size=batch_size)
-        test_samples = test_data.make_one_shot_iterator().get_next()
-
-        return train_samples, test_samples
+        return mat, rhs, t, c, feature
 
     # ---------------------- train & test ----------------------
-    def __init__(self, n, num_layers):
+    def __init__(self, n, num_layers, version='jacobi'):
         self.n = n
         self.num_layers = num_layers
+        self.version = version
 
-        self.ts = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2, (self.n - 1) ** 2], name="t")
-        self.cs = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="c")
+        dim = (self.n - 1) ** 2
 
-        self.mats = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2, (self.n - 1) ** 2], name="mat")
-        self.rhses = tf.placeholder(tf.float32, shape=[None, (self.n - 1) ** 2], name="rhs")
+        self.mat = tf.sparse_placeholder(tf.float32, name="mat")
+        self.rhs = tf.placeholder(tf.float32, shape=(dim, ), name="rhs")
 
-        xks = tf.identity(self.cs)
+        self.t = tf.sparse_placeholder(tf.float32, name="t")
+        self.c = tf.placeholder(tf.float32, shape=(dim, ), name="c")
+
+        size = self.data_generator(w=np.random.rand(), n=self.n).t.data.__len__()
+        self.feature = tf.placeholder(tf.float32, shape=(size + dim, ), name="flatten_feature")
+
+        xk = tf.reshape(self.c, shape=(-1, 1))
         for _ in range(num_layers - 1):
-            xks = tf.reduce_sum(self.ts * tf.reshape(xks, [-1, 1, (self.n - 1) ** 2]), axis=2) + self.cs
+            xk = tf.sparse_tensor_dense_matmul(self.t, xk) + tf.reshape(self.c, [-1, 1])
 
         with tf.name_scope("remainder"):
-            remainder = self.remainder(self.ts, self.cs)
+            remainder = self.remainder(self.feature)
 
-        self.output_roots = xks + remainder
+        self.output_roots = xk + remainder
 
         with tf.name_scope("loss"):
-            residual = tf.reduce_sum(
-                self.mats * tf.reshape(self.output_roots, [-1, 1, (self.n - 1) ** 2]), axis=2) - self.rhses
-            square_norm = tf.reduce_sum(tf.square(residual), axis=1)
+            residual = tf.sparse_tensor_dense_matmul(self.mat, self.output_roots) - tf.reshape(self.rhs, [-1, 1])
+            square_norm = tf.reduce_sum(tf.square(residual))
             self.loss = tf.reduce_mean(tf.sqrt(square_norm))
 
         with tf.name_scope("org_loss"):
-            residual = tf.reduce_sum(self.mats * tf.reshape(xks, [-1, 1, (self.n - 1) ** 2]), axis=2) - self.rhses
-            square_norm = tf.reduce_sum(tf.square(residual), axis=1)
+            residual = tf.sparse_tensor_dense_matmul(self.mat, xk) - tf.reshape(self.rhs, [-1, 1])
+            square_norm = tf.reduce_sum(tf.square(residual))
             self.org_loss = tf.reduce_mean(tf.sqrt(square_norm))
 
         with tf.name_scope("train_op"):
@@ -280,46 +248,124 @@ class TensorflowSolver:
             regularizer = 1e-3 / count * tf.add_n(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
             self.train_op = tf.train.GradientDescentOptimizer(1e-3).minimize(self.loss + regularizer)
 
-    def train(self, batch_size=16, global_step=1024, version='jacobi'):
-        train_samples, test_samples = self.sequence(h=1e-3, batch_size=batch_size, version=version)
+    def train(self, global_step=1024):
 
         with tf.Session() as sess:
             tf.global_variables_initializer().run()
+
+            # ------------ train ------------
             for i in range(global_step):
-                ts, cs, mats, rhses = sess.run(train_samples)
+                mat, rhs, t, c, feature = self.train_samples
                 _, loss_val, org_loss_val = sess.run(
                     [self.train_op, self.loss, self.org_loss],
-                    feed_dict={self.ts: ts, self.cs: cs, self.mats: mats, self.rhses: rhses})
+                    feed_dict={self.mat: mat, self.rhs: rhs, self.t: t, self.c: c, self.feature: feature})
                 print("\r{:7d}/{}\t\tloss:{:.4e}\t\torg_loss:{:.4e}".format(
-                    batch_size * i, batch_size * global_step, loss_val, org_loss_val), end='')
-
+                    i, global_step, loss_val, org_loss_val), end='')
             print()
-            ts, cs, mats, rhses = sess.run(test_samples)
 
-            xks = cs.copy()
+            # ------------ test ------------
+            mat, rhs, t, c, feature = self.test_samples
+            mat_array = coo_matrix((mat.values, mat.indices.T), shape=mat.dense_shape)
+            t_array = coo_matrix((t.values, t.indices.T), shape=t.dense_shape)
+
+            xk = c.copy()
             for k in range(self.num_layers - 1):
-                xks = np.einsum("nij,nj->ni", ts, xks) + cs
-            residual = np.einsum("nij,nj->ni", mats, xks) - rhses
-            error = np.sqrt(np.sum(np.square(residual), axis=1)).mean()
+                xk = t_array @ xk + c
+            residual = mat_array @ xk - rhs
+            error = np.sqrt(np.sum(np.square(residual))).mean()
 
             contrast_error = sess.run(
-                self.loss, feed_dict={self.ts: ts, self.cs: cs, self.mats: mats, self.rhses: rhses})
+                self.loss,
+                feed_dict={self.mat: mat, self.rhs: rhs, self.t: t, self.c: c, self.feature: feature})
 
             print("error:{:.4e}".format(error), ",\tcontrast_error:{:.4e}".format(contrast_error))
 
 
+class PoissonSolver(SparseSolver):
+
+    @property
+    def data_generator(self):
+        if self._data_generator is None:
+
+            # ------------ Redefine the `pde` function. ------------
+            def poisson(w, n, num_refine):
+                """
+                -\Delta u = f, \boldsymbol{x} \in \Omega
+                u = g, \boldsymbol{x} \in \partial \Omega
+                """
+
+                def func_u(x):
+                    return np.cos(w * x[0] + (1 - w) * x[1])
+
+                def func_f(x):
+                    return -(w ** 2 + (1 - w) ** 2) * np.cos(w * x[0] + (1 - w) * x[1])
+
+                func_g = func_u
+
+                # Start to solve
+                mesh = fem_utils.SquareMesh(n=n)
+
+                inner_nn = mesh.inner_node_ids.__len__()
+                bound_nn = mesh.bound_node_ids.__len__()
+
+                # compute mat of (\nabla \phi_{\boldsymbol{u}}, \nabla \phi_{\boldsymbol{u}})
+                # P_1 X P_1
+                gram_tensor = mesh.gram_grad_p1()
+                mat = mesh.node_mul_node(gram_tensor)
+
+                mat_1 = mat[mesh.inner_node_ids, mesh.inner_node_ids]
+                mat_1 = coo_matrix((mat_1.data, (mat_1.idx[0], mat_1.idx[1])), shape=(inner_nn, inner_nn))
+
+                mat_2 = mat[mesh.inner_node_ids, mesh.bound_node_ids]
+                mat_2 = coo_matrix((mat_2.data, (mat_2.idx[0], mat_2.idx[1])), shape=(inner_nn, bound_nn))
+
+                bound_vertices = mesh.vertices[mesh.bound_node_ids]
+                rhs_1 = func_g(bound_vertices.T)
+
+                # compute mat of (\phi_p, f)
+                # P_1 X f
+                integer_tensor = mesh.integer_p1(func_f, num_refine=num_refine)
+                rhs = mesh.node_mul_func(integer_tensor)
+                rhs_2 = rhs[mesh.inner_node_ids]
+
+                mat = mat_1
+                rhs = rhs_2 - mat_2 @ rhs_1
+
+                return mat, rhs
+
+            # ------------ Define the valid `DataGenerator`. ------------
+            if self.version == "jacobi":
+                class PoissonDataGenerator(JacobiDataGenerator):
+                    @classmethod
+                    def pde(cls, w, n, num_refine=3):
+                        return poisson(w, n, num_refine=num_refine)
+            elif self.version == "GS":
+                class PoissonDataGenerator(GSDataGenerator):
+                    @classmethod
+                    def pde(cls, w, n, num_refine=3):
+                        return poisson(w, n, num_refine=num_refine)
+            elif self.version == "SOR":
+                class PoissonDataGenerator(SORDataGenerator):
+                    @classmethod
+                    def pde(cls, w, n, num_refine=3):
+                        return poisson(w, n, num_refine=num_refine)
+            else:
+                raise ValueError
+            self._data_generator = PoissonDataGenerator
+        return self._data_generator
+
+
 # ===================================================================
 tf.app.flags.DEFINE_integer("n", 8, "dimension.")
-tf.app.flags.DEFINE_integer("l", 4, "number of layers.")
-tf.app.flags.DEFINE_integer("b", 16, "batch size.")
+tf.app.flags.DEFINE_integer("l", 8, "number of layers.")
 tf.app.flags.DEFINE_integer("g", 1024, "global step.")
 tf.app.flags.DEFINE_string("v", "GS", "iteration method.")
 FLAGS = tf.app.flags.FLAGS
 
 
 def main(argv):
-    model = TensorflowSolver(n=FLAGS.n, num_layers=FLAGS.l)
-    model.train(batch_size=FLAGS.b, global_step=FLAGS.g, version=FLAGS.v)
+    model = PoissonSolver(n=FLAGS.n, num_layers=FLAGS.l, version=FLAGS.v)
+    model.train(global_step=FLAGS.g)
 
 
 if __name__ == '__main__':
