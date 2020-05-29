@@ -5,9 +5,6 @@ from scipy.sparse.linalg import inv
 import fem_utils
 
 import tensorflow as tf
-import keras
-
-import datetime
 
 
 np.set_printoptions(precision=2)
@@ -190,7 +187,7 @@ class SparseSolver:
         rhs = data.rhs
         t = tf.SparseTensorValue(np.stack(data.t.nonzero(), axis=1), data.t.data, data.t.shape)
         c = data.c
-        feature = np.concatenate([data.t.data, data.c])
+        feature = np.concatenate([data.mat.data, data.rhs])
 
         return mat, rhs, t, c, feature
 
@@ -202,7 +199,7 @@ class SparseSolver:
         rhs = data.rhs
         t = tf.SparseTensorValue(np.stack(data.t.nonzero(), axis=1), data.t.data, data.t.shape)
         c = data.c
-        feature = np.concatenate([data.t.data, data.c])
+        feature = np.concatenate([data.mat.data, data.rhs])
 
         return mat, rhs, t, c, feature
 
@@ -220,7 +217,7 @@ class SparseSolver:
         self.t = tf.sparse_placeholder(tf.float32, name="t")
         self.c = tf.placeholder(tf.float32, shape=(dim, ), name="c")
 
-        size = self.data_generator(w=np.random.rand(), n=self.n).t.data.__len__()
+        size = self.data_generator(w=np.random.rand(), n=self.n).mat.data.__len__()
         self.feature = tf.placeholder(tf.float32, shape=(size + dim, ), name="flatten_feature")
 
         xk = tf.reshape(self.c, shape=(-1, 1))
@@ -234,17 +231,15 @@ class SparseSolver:
 
         with tf.name_scope("loss"):
             residual = tf.sparse_tensor_dense_matmul(self.mat, self.output_roots) - tf.reshape(self.rhs, [-1, 1])
-            square_norm = tf.reduce_sum(tf.square(residual))
-            self.loss = tf.reduce_mean(tf.sqrt(square_norm))
+            self.loss = tf.sqrt(tf.reduce_sum(tf.square(residual)))
+            tf.linalg.norm
 
         with tf.name_scope("org_loss"):
             residual = tf.sparse_tensor_dense_matmul(self.mat, xk) - tf.reshape(self.rhs, [-1, 1])
-            square_norm = tf.reduce_sum(tf.square(residual))
-            self.org_loss = tf.reduce_mean(tf.sqrt(square_norm))
+            self.org_loss = tf.sqrt(tf.reduce_sum(tf.square(residual)))
 
         with tf.name_scope("train_op"):
             count = sum([sum(v.get_shape().as_list()) for v in tf.trainable_variables()])
-            print("count", count)
             regularizer = 1e-3 / count * tf.add_n(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
             self.train_op = tf.train.GradientDescentOptimizer(1e-3).minimize(self.loss + regularizer)
 
@@ -357,7 +352,7 @@ class PoissonSolver(SparseSolver):
 
 # ===================================================================
 tf.app.flags.DEFINE_integer("n", 8, "dimension.")
-tf.app.flags.DEFINE_integer("l", 8, "number of layers.")
+tf.app.flags.DEFINE_integer("l", 16, "number of layers.")
 tf.app.flags.DEFINE_integer("g", 1024, "global step.")
 tf.app.flags.DEFINE_string("v", "GS", "iteration method.")
 FLAGS = tf.app.flags.FLAGS
